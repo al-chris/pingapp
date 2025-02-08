@@ -1,0 +1,18 @@
+[tool.poetry]
+name = "pingapp"
+version = "0.1.0"
+description = "keep site awake"
+authors = ["al-chris"]
+license = "MIT"
+readme = "README.md"
+
+[tool.poetry.dependencies]
+python = "^3.10"
+requests = "^2.32.3"
+python-dotenv = "^1.0.1"
+kivy-reloader = "^0.4.6"
+
+
+[build-system]
+requires = ["poetry-core"]
+build-backend = "poetry.core.masonry.api"
