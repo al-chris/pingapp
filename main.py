@@ -10,13 +10,23 @@ from kivy.clock import Clock
 from kivy.metrics import dp
 from kivy.uix.gridlayout import GridLayout
 from kivy.animation import Animation
-import random
-import requests
-import time
+import json
+import os
 from datetime import datetime, timezone
 import threading
+from jnius import autoclass
+from kivy.utils import platform
 
-kivy.require('2.1.0')
+if platform == "android":
+    from android import loadingscreen
+    from android.permissions import request_permissions, Permission
+    loadingscreen.hide_loading_screen()
+    request_permissions([Permission.WRITE_EXTERNAL_STORAGE])
+
+# Constants
+SERVICE_NAME = 'Ping_service'
+PACKAGE_DOMAIN = 'com.alchris'
+PACKAGE_NAME = 'pinger'
 
 class CustomButton(Button):
     def __init__(self, **kwargs):
@@ -25,12 +35,10 @@ class CustomButton(Button):
         self.background_color = (0.8, 0.2, 0.2, 1)
         
     def on_press(self):
-        # Create animation for button press
         anim = Animation(background_color=(0.6, 0.1, 0.1, 1), duration=0.1)
         anim.start(self)
 
     def on_release(self):
-        # Animate back to original color
         anim = Animation(background_color=(0.8, 0.2, 0.2, 1), duration=0.1)
         anim.start(self)
 
@@ -78,14 +86,10 @@ class LogDisplay(ScrollView):
         Clock.schedule_once(lambda dt: setattr(self, 'scroll_y', 0))
 
     def clear_logs(self):
-        """Clear all logs immediately"""
         def clear_and_add_header(dt):
             self.log_layout.clear_widgets()
-            # Add a header to show logs were cleared
             timestamp = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
             self.add_log(f"[{timestamp}] Logs cleared by user: al-chris", True)
-        
-        # Execute immediately on the next frame
         Clock.schedule_once(clear_and_add_header, 0)
 
 class ControlPanel(BoxLayout):
@@ -145,60 +149,70 @@ class PingApp(App):
     def build(self):
 
         self.main_layout = MainLayout()
-        
-        # Bind the clear button to the new clear_logs method
         self.main_layout.control_panel.clear_button.bind(
             on_release=lambda x: self.main_layout.log_display.clear_logs()
         )
+
+        # Start the background service
+        self.start_background_service()
         
-        # Start with an initial log message
-        Clock.schedule_once(
-            lambda dt: self.main_layout.log_display.add_log(
-                f"[{datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M:%S')}] System started - Monitoring endpoints...",
-                True
-            )
-        )
-        
-        # Start the ping function in a separate thread
-        threading.Thread(target=self.run_ping_function, daemon=True).start()
+        # Start the log reader
+        Clock.schedule_interval(self.read_service_logs, 1.0)
         
         return self.main_layout
 
-    def run_ping_function(self):
-        endpoints = ["https://vasset-kezx.onrender.com/api/v1/utils/health-check/"]
-        self.ping_endpoints(endpoints)
+    def start_background_service(self):
+        try:
+            # Get the service class
+            service = autoclass(f'{PACKAGE_DOMAIN}.{PACKAGE_NAME}.Service{SERVICE_NAME}')
 
-    def update_log(self, message: str, success: bool = True):
-        """Update the log in the UI thread."""
-        Clock.schedule_once(lambda dt: self.main_layout.log_display.add_log(message, success))
+            # Get the Python activity
+            PythonActivity = autoclass('org.kivy.android.PythonActivity')
+            activity = PythonActivity.mActivity
+            
+            # Create log file path
+            log_file = os.path.join(activity.getExternalFilesDir(None).getAbsolutePath(), 'service_logs.json')
+            
+            # Start the service
+            service.start(activity, 'app_icon', 'Ping Service', 'Monitoring endpoints...', log_file)
+            
+            # Log service start
+            timestamp = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
+            self.main_layout.log_display.add_log(
+                f"[{timestamp}] Background service started", True
+            )
+        except Exception as e:
+            timestamp = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
+            self.main_layout.log_display.add_log(
+                f"[{timestamp}] Error starting service: {str(e)}", False
+            )
 
-    def ping_endpoints(
-        self, 
-        endpoints: list[str], 
-        base_interval: int = 55, 
-        extra_interval_min: int = 5, 
-        extra_interval_max: int = 10, 
-        base_pings: int = 1000
-    ) -> None:
-        for _ in range(base_pings):
-            endpoint = random.choice(endpoints)
-            try:
-                response = requests.get(endpoint)
-                timestamp = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
+    def read_service_logs(self, dt):
+        try:
+            # Get the Python activity
+            PythonActivity = autoclass('org.kivy.android.PythonActivity')
+            activity = PythonActivity.mActivity
+            log_file = os.path.join(activity.getApplicationContext().getExternalFilesDir(None).getAbsolutePath(), 'service_logs.json')
+            # log_file = os.path.join(os.getcwd(), "services", "service_logs.json")
+            
+            if os.path.exists(log_file):
+                with open(log_file, 'r') as f:
+                    lines = f.readlines()
                 
-                if response.ok:
-                    message = f"[{timestamp}] ✓ Successfully pinged {endpoint}: {response.status_code}"
-                    self.update_log(message, True)
-                else:
-                    message = f"[{timestamp}] ⚠ Ping failed for {endpoint}: {response.status_code}"
-                    self.update_log(message, False)
-                    
-            except Exception as e:
-                timestamp = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
-                message = f"[{timestamp}] ✗ Error pinging {endpoint}: {str(e)}"
-                self.update_log(message, False)
+                # Clear the file
+                with open(log_file, 'w') as f:
+                    pass
                 
-            time.sleep(base_interval + random.randint(extra_interval_min, extra_interval_max))
+                # Process each line
+                for line in lines:
+                    try:
+                        log_entry = json.loads(line.strip())
+                        message = f"[{log_entry['timestamp']}] {log_entry['message']}"
+                        self.main_layout.log_display.add_log(message, log_entry['success'])
+                    except json.JSONDecodeError:
+                        continue
+        except Exception as e:
+            print(f"Error reading service logs: {e}")
 
 if __name__ == "__main__":
     PingApp().run()
